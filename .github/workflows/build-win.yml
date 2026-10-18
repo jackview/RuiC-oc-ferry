@@ -2,7 +2,10 @@ name: Build Windows Release
 
 # 在 GitHub 云端 Windows runner 上打包 OC Ferry（含"写入 WorkBuddy AI"多目标补丁）。
 # 云端 runner 直连 github.com，可正常下载 Electron 与 NSIS 资源，无需任何代理。
-# 产物为未签名的 NSIS 安装包（带开机自启），用户下载后点"仍要运行"即可。
+# 产物为未签名的 Windows 可执行文件：
+#   - OC-Ferry-0.3.0-win-x64-portable.exe  -> 免安装、双击即跑的"编译后"本体（可直接发给别人）
+#   - OC-Ferry-Setup-0.3.0-win-x64.exe     -> NSIS 安装包（带开机自启），按需使用
+# 两者均含"写入 WorkBuddy AI"多目标补丁。下载后若被 SmartScreen 拦截，点"仍要运行"即可。
 on:
   workflow_dispatch:        # 允许在 Actions 页面手动触发
   push:
@@ -24,8 +27,8 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Build Windows installer (NSIS)
-        run: npx electron-builder --win nsis --x64 --publish never
+      - name: Build Windows (portable + NSIS installer)
+        run: npx electron-builder --win nsis portable --x64 --publish never
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

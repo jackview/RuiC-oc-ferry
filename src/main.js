@@ -3,7 +3,7 @@ import { createWriteStream } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { randomBytes } from 'node:crypto';
-import { resolveModelsFile, validateModelsFile } from './workbuddy-config.js';
+import { resolveModelsFile, validateModelsFile, discoverExtraModelsFiles } from './workbuddy-config.js';
 import { searchConfig, windowsSearchRoots } from './config-finder.js';
 import { dataDirectory } from './platform.js';
 import { findRuntime, startBackend } from './runtime.js';
@@ -13,7 +13,7 @@ import { systemProxyEnvironment } from './system-proxy.js';
 import { prepare, BridgeError } from './protocol.js';
 import { PROBE_TIMEOUT, probeBody, probeModel, probeFailure, formatUnsupported } from './probe.js';
 import { modelResult, withRequestMeta, usableModelIds } from './model-status.js';
-import { atomicWrite, syncModels } from './sync.js';
+import { atomicWrite, syncModelsAll } from './sync.js';
 import { createProbeCache } from './probe-cache.js';
 
 // 服务端进程：Electron 以 fork 方式拉起它，也可以直接 `npm start` 独立运行。
@@ -78,17 +78,22 @@ let syncWrites = Promise.resolve();
 let modelsFile = process.platform === 'win32'
   ? await resolveModelsFile({ saved: settings.workBuddyModelsFile })
   : process.env.FERRY_MODELS_FILE || path.join(os.homedir(), '.workbuddy/models.json');
-update({ modelsFile });
+// 除主配置外，自动发现同机其它 WorkBuddy 配置（如 .workbuddy-ai），
+// 让一次导入同时落到多个产品。未发现则为空数组，行为与改动前一致。
+let extraModelsFiles = await discoverExtraModelsFiles(modelsFile);
+update({ modelsFile, extraModelsFiles });
 
 // 导入 WorkBuddy 的写操作也串行化：两次并发导入会把同一份配置写乱。
+// 同时写入主配置与所有额外发现的配置（如 .workbuddy-ai）。
 function syncPublished(published = publishedModels().filter(m => !(settings.excludedModels || []).includes(m.id))) {
   syncWrites = syncWrites.then(async () => {
+    const targets = [modelsFile, ...extraModelsFiles].filter(Boolean);
     let sync;
     if (process.env.FERRY_NO_SYNC === '1') sync = { skipped: true, count: published.length };
     else {
       try {
-        if (!modelsFile) throw new Error('未找到有效的 WorkBuddy 配置，请点击导入并选择 models.json；首次使用请先在 WorkBuddy 保存一个自定义模型。');
-        sync = await syncModels(modelsFile, published, `${endpoint}/chat/completions`, key, { allowEmpty: true, requireExisting: process.platform === 'win32' });
+        if (!targets.length) throw new Error('未找到有效的 WorkBuddy 配置，请点击导入并选择 models.json；首次使用请先在 WorkBuddy 保存一个自定义模型。');
+        sync = await syncModelsAll(targets, published, `${endpoint}/chat/completions`, key, { allowEmpty: true, requireExisting: process.platform === 'win32' });
       }
       catch (e) { sync = { error: e.message }; }
     }
@@ -419,9 +424,17 @@ try {
     // 全新安装默认跟随系统代理，但一台根本没配手动代理的机器也必须能下载。
     // 明确保存过"开"的用户例外：那是用户的选择，出错就该报出来。
     if (settings.useSystemProxy === true) throw error;
-    startupProxyEnv = await systemProxyEnvironment(false);
-    update({ useSystemProxy: false });
-    log.write(`${new Date().toISOString()} 未检测到可用的系统代理，首次下载改为直连：${error.message}\n`);
+    // 沙箱/CI 环境常通过环境变量（而非 Windows 注册表）注入代理。
+    // 注册表无手动代理时，退回使用进程环境变量中的 HTTPS_PROXY，保证 OpenCode 下载与转发口出网正常。
+    const envProxy = process.env.HTTPS_PROXY || process.env.HTTP_PROXY || process.env.https_proxy || process.env.http_proxy;
+    if (envProxy) {
+      startupProxyEnv = { HTTP_PROXY: envProxy, HTTPS_PROXY: envProxy, http_proxy: envProxy, https_proxy: envProxy, NO_PROXY: 'localhost,127.0.0.1,::1', no_proxy: 'localhost,127.0.0.1,::1' };
+      log.write(`${new Date().toISOString()} 注册表无系统代理，改用环境变量代理进行下载与转发：${envProxy}\n`);
+    } else {
+      startupProxyEnv = await systemProxyEnvironment(false);
+      update({ useSystemProxy: false });
+      log.write(`${new Date().toISOString()} 未检测到可用的系统代理，首次下载改为直连：${error.message}\n`);
+    }
   }
   binary = await findRuntime(dataDir, message => update({ message }), {
     proxyEnv: startupProxyEnv,

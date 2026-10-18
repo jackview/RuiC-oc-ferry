@@ -97,3 +97,20 @@ export async function syncModels(file, models, endpoint, key, options = {}) {
     return { changed: true, count, backup };
   } finally { await lock.close(); await fs.unlink(lockFile).catch(() => {}); }
 }
+
+// 一次性把模型同步到多个 WorkBuddy 配置（例如同时写入 .workbuddy 与 .workbuddy-ai）。
+// 每个目标独立加锁、合并、备份；单个目标失败不影响其余目标，失败信息随 files 返回。
+export async function syncModelsAll(files, models, endpoint, key, options = {}) {
+  const list = (Array.isArray(files) ? files : [files]).filter(Boolean);
+  const results = [];
+  let changed = false, count = 0, error;
+  for (const file of list) {
+    try {
+      const r = await syncModels(file, models, endpoint, key, options);
+      results.push({ file, ...r });
+      if (r.changed) changed = true;
+      if (typeof r.count === 'number') count += r.count;
+    } catch (e) { results.push({ file, error: e.message }); error = e.message; }
+  }
+  return { changed, count, files: results, error };
+}
